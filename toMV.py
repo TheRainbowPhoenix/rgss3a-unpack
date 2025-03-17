@@ -4,6 +4,7 @@ from struct import *
 import json
 import ctypes
 import os
+import re
 
 def convert_str(value):
     if isinstance(value, bytes):
@@ -117,6 +118,51 @@ def get_troop_pages(pages):
         })
     return converted_pages
 
+_convert_map = {
+    "$game_actors[": "$gameActors._data[",
+    ".change_equip_by_id(": ".changeEquipById(",
+    "$game_variables[": "$gameVariables._data[",
+    "$game_switches[": "$gameSwitches._data[",
+    "$game_self_switches[": "$gameSelfSwitches._data[",
+    "$game_player.": "$gamePlayer.",
+    "$game_temp.": "$gameTemp.",
+    "Input.press?(:CTRL)": "Input.isPressed('control')",
+    "else": "} else {",
+    "end": "}",
+    "= nil": "= null",
+    "fps_mode_change(2)": "Graphics.showFps()",
+    "fps_mode_change(1)": "Graphics.hideFps()",
+    "Window_Base.new(": "new Window_Base(",
+    ".draw_text(": ".drawText(",
+    "SceneManager.scene.log_window.add_text(": "SceneManager._scene._logWindow.addText(",
+    # Disabled
+    "wait(": "// wait(",
+    "adv_pcture_number(": "// adv_pcture_number(",
+}
+
+_convert_pat = {
+    r'^if\s+(.*)$': r'if (\1) {'
+}
+
+def convert_to_js(params): # Convert some commands to the MV / JS equivalent.
+    out = []
+    for p in params:
+        if not isinstance(p, str):
+            p = str(p)
+        
+        # Apply simple replacements from _convert_map
+        for src, dst in _convert_map.items():
+            p = p.replace(src, dst)
+        
+        # Apply regex patterns from _convert_pat at the end
+        for pattern, replacement in _convert_pat.items():
+            p = re.sub(pattern, replacement, p)
+        
+        out.append(p)
+
+    return out
+    
+
 def get_command_list(commands):
     if not commands:
         return [{"code":0,"indent":0,"parameters":[]}] # TODO !!!
@@ -172,6 +218,12 @@ def get_command_list(commands):
                     f'{_var_or_value(params[3], params[5])}, '
                     f'{params[6]}, {params[7]}, {params[8]}, {params[9]})'
                 ]
+        elif code == 223:
+            if len(params) == 3:
+                params[0] = [0, 0, 0, 0]
+        elif code == 224:
+            if len(params) == 3:
+                params[0] = [255, 255, 255, 255]
         elif code == 232:  # Move Picture
             params[1] = 0  # Unused parameter
             if params[9] == 2:
@@ -184,6 +236,11 @@ def get_command_list(commands):
                     f'{params[6]}, {params[7]}, {params[8]}, {params[9]}, '
                     f'{params[10]}){wait_str}'
                 ]
+        # elif code == 250:
+        # elif code == 241:
+        elif code == 224:
+            if len(params) == 0: # Skip invalid / empty ?
+                continue
         elif code == 285:  # Get Location Info
             if params[1] == 5:
                 params[1] = 6  # Adjust region ID
@@ -200,7 +257,8 @@ def get_command_list(commands):
             params[4] = 0  # Clear SV graphic
             params[5] = ''
         elif code in (355, 655):  # Script call
-            print('Script call', params[0])
+            params = convert_to_js(convert_parameters(params))
+            # print('Script call', params[0])
         elif code == 505:  # Move Route
             mvrcmd = params[0]
             if mvrcmd.attributes.get("@code", 0) == 45:  # Script in move route
@@ -251,7 +309,7 @@ def convert_parameters(params):
                 converted.append(get_move_route(param))
             elif param.ruby_class_name == "RPG::MoveCommand":
                 converted.append(process_move_command(param))
-            elif param.ruby_class_name == "RPG::AudioFile":
+            elif param.ruby_class_name in ("RPG::AudioFile", "RPG::SE", "RPG::BGM", "RPG::BGS", "RPG::ME"):
                 converted.append(get_audio(param))
             # elif isinstance(param, (Tone, Color)):
             #     converted.append(convert_color_tone(param))
@@ -300,7 +358,7 @@ def get_audio(audio):
     if not audio:
         return {"name":"Fire1","pan":0,"pitch":100,"volume":100}
     return {
-        "name": audio.attributes.get("@name", ""),
+        "name": convert_str(audio.attributes.get("@name", "")),
         "pan": 0,  # MV/MZ always uses 0 pan for compatibility
         "pitch": audio.attributes.get("@pitch", 100),
         "volume": audio.attributes.get("@volume", 100)
@@ -405,6 +463,20 @@ def get_test_battlers(battlers):
         "equips": b.attributes.get("@equips", []),
         "level": b.attributes.get("@level", 1)
     } for b in battlers]
+
+def find_ruby_string(data):
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if isinstance(value, RubyString):
+                print(f"Found RubyString at key '{key}': {value}")
+            else:
+                find_ruby_string(value)  # Recurse for nested objects
+    elif isinstance(data, list):
+        for i, value in enumerate(data):
+            if isinstance(value, RubyString):
+                print(f"Found RubyString at index {i}: {value}")
+            else:
+                find_ruby_string(value)
 
 def convert_ruby_strings(data):
     if isinstance(data, dict):
